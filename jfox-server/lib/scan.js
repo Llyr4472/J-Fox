@@ -14,13 +14,6 @@ const CONTEXT_KEYWORDS = [
   "credential",
 ];
 
-// Patterns for a generic, high-entropy string.
-// We look for strings of 20-60 characters that mix letters, numbers, and symbols.
-const HIGH_ENTROPY_STRING_PATTERN = new RegExp(
-  "[a-zA-Z0-9-_.+!@#$%^&*()]{20,60}",
-  "g"
-);
-
 // Patterns that are highly specific and likely to be a secret on their own.
 const HIGH_CONFIDENCE_PATTERNS = {
   GOOGLE_API_KEY: new RegExp("AIza[0-9A-Za-z-_]{35}"),
@@ -33,40 +26,30 @@ const HIGH_CONFIDENCE_PATTERNS = {
   RSA_PRIVATE_KEY: new RegExp("-----BEGIN RSA PRIVATE KEY-----"),
 };
 
-// Common placeholder values to ignore.
-const IGNORE_PATTERNS = [
-  /your-api-key/i,
-  /your-secret/i,
-  /placeholder/i,
-  /example/i,
-  /test-key/i,
-  /dummy-key/i,
-  /sample-key/i,
-  /test-secret/i,
-  /dummy-secret/i,
-  /example-key/i,
-  /test-token/i,
-  /dummy-token/i,
-  /example-token/i,
-  /your-token/i,
-  /your-password/i,
-  /your-client-secret/i,
-  /your-access-key/i,
-];
+// More specific regex to reduce false positives
+const CANDIDATE_REGEX = /['"`]([A-Za-z0-9+\/=_\-]{20,80})['"`]/g;
 
-const MINIFIED_LINE_LENGTH_THRESHOLD = 1000;
+const IGNORE_PATTERNS = {
+  PLACEHOLDER:
+    /your-key|placeholder|example|test-key|dummy|sample|default|undefined|null/i,
+  URL_PATH: /(https?:\/\/[^\s]+)|(\/[a-z0-9_-]+\/)/i,
+  MINIFIED_JS_CHUNK: /[a-zA-Z]{1,2}\.[a-zA-Z]{1,2}\(.*\)/,
+  HTML_CONTENT: /<[^>]+>/,
+  COMMON_WORDS:
+    /\b(password|username|email|phone|address|name|title|description|content|message|text|data)\b/i,
+  FILE_PATHS: /([A-Za-z]:\\|\/)[\w\-. \\\/]+/,
+  BASE64_IMAGE: /data:image\/[^;]+;base64,/,
+  UUID: /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i,
+};
 
-const DOMAIN_NAME_PATTERN = new RegExp(/([a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,}/);
-
-// --- ENTROPY CALCULATION --
 function calculateEntropy(str) {
-  if (!str) return 0;
-  const frequency = {};
+  if (!str || str.length === 0) return 0;
+  const frequency = {},
+    len = str.length;
   for (const char of str) {
     frequency[char] = (frequency[char] || 0) + 1;
   }
   let entropy = 0;
-  const len = str.length;
   for (const char in frequency) {
     const p = frequency[char] / len;
     entropy -= p * Math.log2(p);
@@ -74,7 +57,22 @@ function calculateEntropy(str) {
   return entropy;
 }
 
-// --- REWRITTEN CORE SCANNER ---
+function countUniqueChars(str) {
+  return new Set(str).size;
+}
+
+function isLikelySecret(str) {
+  // Check for common patterns that indicate a non-secret
+  if (str.length > 80) return false;
+  if (str.includes(" ")) return false;
+  if (/^[0-9]+$/.test(str)) return false; // all numbers
+
+  // Must contain at least one number and one letter
+  if (!(/[0-9]/.test(str) && /[a-zA-Z]/.test(str))) return false;
+
+  return true;
+}
+
 function findSecretsInContent(content) {
   const allFindings = new Map();
   const lines = content.split("\n");
@@ -82,64 +80,75 @@ function findSecretsInContent(content) {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const lineNumber = i + 1;
-    const trimmedLine = line.trim();
 
-    // --- HEURISTIC: Check if the line looks minified ---
-    const isMinified = trimmedLine.length > MINIFIED_LINE_LENGTH_THRESHOLD;
+    let candidateMatch;
+    while ((candidateMatch = CANDIDATE_REGEX.exec(line)) !== null) {
+      const candidate = candidateMatch[1];
 
-    // Tier 1, check for high-confidence, specific patterns.
+      // Enhanced validation pipeline
+      if (countUniqueChars(candidate) < 8) continue;
+      const entropy = calculateEntropy(candidate);
+      if (entropy < 3.5) continue;
+      if (!isLikelySecret(candidate)) continue;
+
+      // Check against all ignore patterns
+      let shouldIgnore = false;
+      for (const [, pattern] of Object.entries(IGNORE_PATTERNS)) {
+        if (pattern.test(candidate)) {
+          shouldIgnore = true;
+          break;
+        }
+      }
+      if (shouldIgnore) continue;
+
+      // Context analysis
+      const surroundingContext = lines
+        .slice(Math.max(0, i - 2), Math.min(lines.length, i + 3))
+        .join(" ")
+        .toLowerCase();
+
+      const hasContext = CONTEXT_KEYWORDS.some((keyword) =>
+        surroundingContext.includes(keyword)
+      );
+
+      const confidence = hasContext ? "High" : "Medium";
+
+      // Only include findings with high confidence or those matching known patterns
+      if (
+        confidence === "High" ||
+        Object.values(HIGH_CONFIDENCE_PATTERNS).some((pattern) =>
+          pattern.test(candidate)
+        )
+      ) {
+        if (!allFindings.has(candidate)) {
+          allFindings.set(candidate, {
+            type: hasContext ? "Contextual Secret" : "Potential Secret",
+            value: candidate,
+            confidence,
+            lineNumber,
+            lineContent: line.trim(),
+          });
+        }
+      }
+    }
+
+    // Check for known high-confidence patterns
     for (const [type, pattern] of Object.entries(HIGH_CONFIDENCE_PATTERNS)) {
-      const match = trimmedLine.match(pattern);
+      const match = line.match(pattern);
       if (match && !allFindings.has(match[0])) {
         allFindings.set(match[0], {
           type,
           value: match[0],
           confidence: "High",
           lineNumber,
-          lineContent: trimmedLine,
+          lineContent: line.trim(),
         });
-      }
-    }
-
-    // Tier 2, check for generic high-entropy strings.
-    if (!isMinified) {
-      const hasContextKeyword = CONTEXT_KEYWORDS.some((keyword) =>
-        trimmedLine.toLowerCase().includes(keyword)
-      );
-
-      if (hasContextKeyword) {
-        const entropyMatches = trimmedLine.match(HIGH_ENTROPY_STRING_PATTERN);
-        if (entropyMatches) {
-          for (const match of entropyMatches) {
-            // 1. Check if it's an obvious placeholder
-            const isIgnoredPlaceholder = IGNORE_PATTERNS.some((p) =>
-              p.test(match)
-            );
-            if (isIgnoredPlaceholder || allFindings.has(match)) continue;
-
-            // 2. Check if it looks like a domain name
-            const isDomainName = DOMAIN_NAME_PATTERN.test(match);
-            if (isDomainName) continue; // If it's a domain, skip it!
-
-            // 3. Only now, calculate entropy
-            const entropy = calculateEntropy(match);
-            if (entropy > 3.5) {
-              allFindings.set(match, {
-                type: "Generic Secret (High Entropy)",
-                value: match,
-                confidence: "Medium",
-                lineNumber,
-                lineContent: trimmedLine,
-              });
-            }
-          }
-        }
       }
     }
   }
 
   return Array.from(allFindings.values());
-  }
+}
 
 // --- LIBRARY IDENTIFICATION ---
 const LIBRARY_PATTERNS = [
