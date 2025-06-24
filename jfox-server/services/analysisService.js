@@ -3,8 +3,8 @@ const { extractAllJavaScript, extractCrawlableLinks } = require("../lib/parse");
 const { findSecretsInContent, findLibrariesInContent } = require("../lib/scan");
 const { queryOsvApiBatch } = require("../lib/osv");
 
-const MAX_CRAWL_DEPTH = 3; 
-const MAX_PAGES_TO_VISIT = 15; 
+const MAX_CRAWL_DEPTH = 2; 
+const MAX_PAGES_TO_VISIT = 10; 
 
 async function analyzePage(url) {
   const html = await fetchHtml(url);

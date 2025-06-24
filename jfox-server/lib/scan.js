@@ -40,6 +40,11 @@ const IGNORE_PATTERNS = {
   FILE_PATHS: /([A-Za-z]:\\|\/)[\w\-. \\\/]+/,
   BASE64_IMAGE: /data:image\/[^;]+;base64,/,
   UUID: /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i,
+  WEBGL_EXTENSIONS: /WEBGL_compressed_texture_(s3tc(_srgb)?|etc1)/i,
+  THREEJS_CLASSES: /QuadraticBezierCurve3/i,
+  BASE64_ENCODED: /[A-Za-z0-9+/]{20,}={0,2}/,
+  COMMON_NUMBERS: /[0-9]{5,}/,
+  ENGLISH_WORDS: /\b(the|be|to|of|and|a|in|that|have|I|it|for|not|on|with|he|as|you|do|at|this|but|his|by|from|they|we|say|her|she|or|an|will|my|one|all|would|there|their|what|so|up|out|if|about|who|get|which|go|me|when|make|can|like|time|no|just|him|know|take|people|into|year|your|good|some|could|them|see|other|than|then|now|look|only|come|its|over|think|also|back|after|use|two|how|our|work|first|well|way|even|new|want|because|any|these|give|day|most|us)\b/i
 };
 
 function calculateEntropy(str) {
@@ -66,6 +71,7 @@ function isLikelySecret(str) {
   if (str.length > 80) return false;
   if (str.includes(" ")) return false;
   if (/^[0-9]+$/.test(str)) return false; // all numbers
+  if (IGNORE_PATTERNS.ENGLISH_WORDS.test(str.toLowerCase())) return false; // contains common English words
 
   // Must contain at least one number and one letter
   if (!(/[0-9]/.test(str) && /[a-zA-Z]/.test(str))) return false;
@@ -101,21 +107,32 @@ function findSecretsInContent(content) {
       }
       if (shouldIgnore) continue;
 
-      // Context analysis
+      // Context analysis - check 5 lines before and after for better context
+      const contextStart = Math.max(0, i - 5);
+      const contextEnd = Math.min(lines.length, i + 6);
       const surroundingContext = lines
-        .slice(Math.max(0, i - 2), Math.min(lines.length, i + 3))
+        .slice(contextStart, contextEnd)
         .join(" ")
         .toLowerCase();
 
-      const hasContext = CONTEXT_KEYWORDS.some((keyword) =>
-        surroundingContext.includes(keyword)
-      );
-
-      const confidence = hasContext ? "High" : "Medium";
+      let hasContext = false;
+      for (const keyword of CONTEXT_KEYWORDS) {
+        // Check for variations of the keyword
+        const variations = [
+          keyword,
+          keyword.replace(/_/g, ''),
+          keyword.replace(/_/g, '-'),
+          ...keyword.split('_')
+        ];
+        if (variations.some(v => surroundingContext.includes(v))) {
+          hasContext = true;
+          break;
+        }
+      }
 
       // Only include findings with high confidence or those matching known patterns
       if (
-        confidence === "High" ||
+        hasContext ||
         Object.values(HIGH_CONFIDENCE_PATTERNS).some((pattern) =>
           pattern.test(candidate)
         )
@@ -124,9 +141,9 @@ function findSecretsInContent(content) {
           allFindings.set(candidate, {
             type: hasContext ? "Contextual Secret" : "Potential Secret",
             value: candidate,
-            confidence,
+            confidence: hasContext ? "High" : "Medium",
             lineNumber,
-            lineContent: line.trim(),
+            lineContent: line.slice(0, 100).trim(),
           });
         }
       }
@@ -141,7 +158,7 @@ function findSecretsInContent(content) {
           value: match[0],
           confidence: "High",
           lineNumber,
-          lineContent: line.trim(),
+          lineContent: line.slice(0, 100).trim(),
         });
       }
     }
