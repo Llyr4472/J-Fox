@@ -8,33 +8,34 @@ function App() {
   const [results, setResults] = useState(null);
   const [error, setError] = useState(null);
 
-  const handleStartAnalysis = (urlFromForm) => {
+  const handleStartAnalysis = async (urlFromForm) => {
     console.log('Sniffing the URL:', urlFromForm);
     setIsLoading(true);
     setResults(null);
+    setError(null);
 
-    // Simulate an API call or analysis process
-    setTimeout(() => {
-      setIsLoading(false);
-      const didAnErrorOccur = Math.random() < 0.2; // Simulate a 20% chance of error
+    try {
+      const response = await fetch('http://localhost:3001/analyze', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ url: urlFromForm }),
+      });
 
-      if (didAnErrorOccur) {
-        setError('An error occurred during analysis.');
-        setResults(null);
-      } else {
-        setResults({
-          url: urlFromForm,
-          vulnerabilities: [
-            { type: 'XSS', description: 'Cross-Site Scripting vulnerability detected.' },
-            { type: 'CSRF', description: 'Cross-Site Request Forgery vulnerability detected.' },
-          ],
-          timestamp: new Date().toISOString(),
-        });
-        setError(null);
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
       }
 
-    }, 2000);
-  };
+      const data = await response.json();
+      setResults(data);
+    } catch (error) {
+    console.error('Error:', error);
+    setError(error.message || 'An unexpected error occurred');
+  } finally {
+    setIsLoading(false);
+  }
+};
   
   const contentHasAppeared = results || error;
 
